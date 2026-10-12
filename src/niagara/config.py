@@ -7,8 +7,7 @@ from dataclasses import dataclass
 class NiagaraConfig:
     """Scientific configuration for a Niagara fit.
 
-    Defaults match the publication implementation. ``window_length`` is
-    retained for compatibility, although publication code always uses 30.
+    Defaults match the publication implementation.
     """
 
     search: str = "exhaustive"

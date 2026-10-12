@@ -228,13 +228,6 @@ def fit(
     numeric_horizon = _as_time(horizon, "horizon")
     if numeric_horizon <= 0:
         raise ValueError("horizon must be positive")
-    if effective.search == "partial" and effective.window_length != 30:
-        warnings.warn(
-            "The publication implementation ignores window_length and uses 30; "
-            "the supplied value is retained in the configuration but not applied.",
-            NiagaraCompatibilityWarning,
-            stacklevel=2,
-        )
     if not effective.start_only:
         warnings.warn(
             "start_only=False uses the unchanged end-event path from the "

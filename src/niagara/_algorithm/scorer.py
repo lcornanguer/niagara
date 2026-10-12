@@ -101,7 +101,7 @@ class Scorer:
 
     def score_promising_edges(self):
         scores = {n: {} for n in self.graph.get_non_logical_nodes()}
-        promising_edges = self.causal_superset_estimation() #  5.3 Causal Superset Estimation in paper
+        promising_edges = self.causal_superset_estimation(width=args.window_length) #  5.3 Causal Superset Estimation in paper
         for event in self.graph.events:
             s_node = event.s_node
             e_node = event.e_node
