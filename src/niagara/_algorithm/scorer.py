@@ -567,8 +567,8 @@ class Scorer:
         while improvement and any([d != np.inf for d in delays]):
             max_m = max([m for m in matches if m[2] is not np.inf], key=lambda m: m[2])
             max_delay = max_m[2]
-            max_ch = max_m[0]
-            max_pa = max_m[1]
+            max_pa = max_m[0]
+            max_ch = max_m[1]
 
             # remove max delay
             new_delays = delays.copy()
@@ -713,8 +713,8 @@ class Scorer:
             max_m = max([m for m in matches if m[2] is not np.inf], key=lambda m: m[2])
             max_delay = max_m[2]
             max_pa_node = max_m[3]
-            max_ch = max_m[0]
-            max_pa = max_m[1]
+            max_pa = max_m[0]
+            max_ch = max_m[1]
 
             # remove max delay
             new_delays = {k: v.copy() for k, v in delays.items()}
