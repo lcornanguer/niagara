@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use Niagara, please cite the accompanying paper."
+type: software
+title: "Niagara"
+version: 0.1.0
+license: BSD-3-Clause
+authors:
+  - family-names: Cornanguer
+    given-names: Lénaïg
+  - family-names: Cüppers
+    given-names: Joscha
+  - family-names: Vreeken
+    given-names: Jilles
+preferred-citation:
+  type: conference-paper
+  title: "Causal Discovery from Interval-Based Event Sequences"
+  authors:
+    - family-names: Cornanguer
+      given-names: Lénaïg
+    - family-names: Cüppers
+      given-names: Joscha
+    - family-names: Vreeken
+      given-names: Jilles
+  collection-title: "Proceedings of the AAAI Conference on Artificial Intelligence"
+  publisher:
+    name: AAAI
+  year: 2026
