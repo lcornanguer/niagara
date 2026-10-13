@@ -275,13 +275,6 @@ def fit(
     recorded timestamp.
     """
     effective = config if config is not None else NiagaraConfig()
-    if not effective.start_only:
-        warnings.warn(
-            "start_only=False uses the unchanged end-event path from the "
-            "publication snapshot, including its known limitations.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
     names, occurrences, horizons, empty_graph = _normalise_input(
         data, feature_names, horizon, effective
@@ -299,7 +292,6 @@ def fit(
             "window_length": args.window_length,
             "err_max": args.err_max,
             "precision": args.precision,
-            "duration_distrib": args.duration_distrib,
             "or_heuristic": args.or_heuristic,
             "start_only": args.start_only,
         }
@@ -308,9 +300,8 @@ def fit(
         args.window_length = effective.window_length
         args.err_max = effective.max_error
         args.precision = effective.precision
-        args.duration_distrib = effective.duration_distribution
         args.or_heuristic = effective.or_heuristic
-        args.start_only = effective.start_only
+        args.start_only = True
         output = nullcontext() if effective.verbose else redirect_stdout(io.StringIO())
         try:
             with output:

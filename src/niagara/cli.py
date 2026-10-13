@@ -64,11 +64,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-error", type=float, default=0.1)
     parser.add_argument("--window-length", type=float, default=30)
-    parser.add_argument(
-        "--include-end-events",
-        action="store_true",
-        help="Use the publication implementation's start_only=False mode.",
-    )
     parser.add_argument("--no-or-heuristic", action="store_true")
     parser.add_argument("--precision", type=int, default=2)
     parser.add_argument("--verbose", action="store_true")
@@ -84,7 +79,6 @@ def main(argv: Any = None) -> int:
         config = NiagaraConfig(
             search=namespace.search,
             max_error=namespace.max_error,
-            start_only=not namespace.include_end_events,
             or_heuristic=not namespace.no_or_heuristic,
             precision=namespace.precision,
             window_length=namespace.window_length,

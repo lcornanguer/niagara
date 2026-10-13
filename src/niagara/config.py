@@ -12,11 +12,9 @@ class NiagaraConfig:
 
     search: str = "exhaustive"
     max_error: float = 0.1
-    start_only: bool = True
     or_heuristic: bool = True
     precision: int = 2
     window_length: float = 30
-    duration_distribution: str = "LogNormal"
     verbose: bool = False
 
     def __post_init__(self) -> None:
@@ -28,8 +26,3 @@ class NiagaraConfig:
             raise ValueError("precision must be non-negative")
         if self.window_length <= 0:
             raise ValueError("window_length must be positive")
-        if self.duration_distribution != "LogNormal":
-            raise ValueError(
-                "The publication implementation supports only "
-                "duration_distribution='LogNormal'."
-            )

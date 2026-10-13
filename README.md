@@ -89,8 +89,11 @@ Rows are kept in their supplied order, and event names are preserved.
 
 `fit(data, *, horizon=None, feature_names=None, config=None)` fits Niagara and returns a `NiagaraResult`.
 
-`NiagaraConfig` controls exhaustive or partial search, the maximum error proportion, start-only mode, the OR heuristic, and MDL precision.
+`NiagaraConfig` controls exhaustive or partial search, the maximum error proportion, the OR heuristic, and MDL precision.
 Defaults match the publication implementation.
+
+Niagara discovers causes of event starts only.
+It does not search for causes of event ends because the causal-identifiability theory assumes exponential waiting-time distributions, whereas event durations are modeled with a log-normal distribution.
 
 `NiagaraResult.adjacency` is the event-level parent-by-child adjacency matrix, labeled by `NiagaraResult.feature_names` on both axes.
 `NiagaraResult.edges` contains the corresponding named `(parent, child)` pairs.
