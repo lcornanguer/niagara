@@ -4,7 +4,8 @@ Niagara is a causal discovery method for interval-based event sequences.
 It models event starts, active intervals, and event ends, and selects causal mechanisms between events using a minimum-description-length score.
 
 This repository contains the reusable implementation accompanying the AAAI 2026 paper *Causal Discovery from Interval-Based Event Sequences* (see citation below). 
-Version 0.1.0 preserves the behavior of the implementation used for the publication.
+Version 0.1.0 retains the behaviour of the implementation used for the experiments in the publication.
+The latest version is recommended for any further experimentation.
 
 ## Installation
 
