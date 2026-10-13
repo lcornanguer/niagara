@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use Niagara, please cite the accompanying paper."
 type: software
 title: "Niagara"
-version: 0.1.0
+version: 0.2.0
 license: BSD-3-Clause
 authors:
   - family-names: Cornanguer
