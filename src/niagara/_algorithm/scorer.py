@@ -26,6 +26,11 @@ class Scorer:
         self.empty_graph = empty_graph
         self.stored_intervals = dict()
         self.verbose = verbose
+        self.sequences = []
+        for occurrences in self.data.values():
+            for occurrence in occurrences:
+                if occurrence.ts_index not in self.sequences:
+                    self.sequences.append(occurrence.ts_index)
 
         n = len(self.graph.events)
         comb = math.comb(n-1, 2)
@@ -157,7 +162,7 @@ class Scorer:
 
         return merged  # Return merged list
 
-    def get_nb_ongoing(self, occs):
+    def get_nb_ongoing(self, occs, n):
         events = []  # Store event start and end times
         for o in occs:
             events.append((o.start, 1))  # Start of an event (+1)
@@ -166,7 +171,7 @@ class Scorer:
         events.sort()  # Sort by time
 
         ongoing = 0
-        result = IntervalList(n=self.n)
+        result = IntervalList(n=n)
         prev_time = 0  # Start from 0
 
         for time, change in events:
@@ -178,11 +183,11 @@ class Scorer:
         result.fill_gaps()  # Ensure complete coverage
         for elem in result.intervals:
             elem.count = min(elem.count, 1)
-        result.intervals[-1].end = self.n
+        result.intervals[-1].end = n
         return result
 
 
-    def get_nb_ongoing_logical(self, occs1, occs2, mode="and"):
+    def get_nb_ongoing_logical(self, occs1, occs2, n, mode="and"):
         """
         Compute the number of ongoing events in time intervals with AND or XOR condition
 
@@ -194,8 +199,8 @@ class Scorer:
         Returns:
             List(s) of tuples (start_time, end_time, count).
         """
-        int1 = self.get_nb_ongoing(occs1)
-        int2 = self.get_nb_ongoing(occs2)
+        int1 = self.get_nb_ongoing(occs1, n)
+        int2 = self.get_nb_ongoing(occs2, n)
         if mode == 'and':
             result = int1.and_op(int2)
         elif mode == 'xor':
@@ -209,19 +214,32 @@ class Scorer:
             for elem in result.intervals: elem.count = min(elem.count, 1)
         return result
 
-    def manage_stored_intervals(self, node):
-        key = [k for k in self.stored_intervals.keys() if k.is_eq(node)]
+    def manage_stored_intervals(self, node, sequence):
+        key = [k for k in self.stored_intervals.keys() if k[1] == sequence and k[0].is_eq(node)]
         if len(key) > 0:
             return self.stored_intervals[key[0]]
         else:
             if isinstance(node, LogicalNode):
-                nb_ongoing = self.get_nb_ongoing_logical(self.data[node.parents[0].event.name], self.data[node.parents[1].event.name], node.operator)
+                occs1 = [occ for occ in self.data[node.parents[0].event.name] if occ.ts_index == sequence]
+                occs2 = [occ for occ in self.data[node.parents[1].event.name] if occ.ts_index == sequence]
+                nb_ongoing = self.get_nb_ongoing_logical(occs1, occs2, self.n[sequence], node.operator)
                 if node.operator in ['xor']:
                     nb_ongoing = {node.parents[0].name: nb_ongoing[0], node.parents[1].name: nb_ongoing[1], 'both': nb_ongoing[2]}
             else:
-                nb_ongoing = self.get_nb_ongoing(self.data[node.event.name])
-            self.stored_intervals[node] = nb_ongoing
-            return self.stored_intervals[node]
+                occurrences = [occ for occ in self.data[node.event.name] if occ.ts_index == sequence]
+                nb_ongoing = self.get_nb_ongoing(occurrences, self.n[sequence])
+            self.stored_intervals[(node, sequence)] = nb_ongoing
+            return self.stored_intervals[(node, sequence)]
+
+    def get_times_by_sequence(self, event, moment, intervals=None, positive=True, offset=0):
+        times = {sequence: [] for sequence in self.sequences}
+        for occurrence in self.data[event]:
+            time = getattr(occurrence, moment)
+            if time is None: continue
+            if intervals is None or intervals[occurrence.ts_index].positive_count(time-offset) == positive:
+                times[occurrence.ts_index].append(time)
+        for values in times.values(): values.sort()
+        return times
 
     def and_fit(self, pa1, pa2, child):
         """
@@ -234,16 +252,14 @@ class Scorer:
         ln = LogicalNode([pa1, pa2], 'and')
         mom = 'start' if isinstance(child, StartNode) else 'end'
         if isinstance(pa1, IntervalNode) and isinstance(pa2, IntervalNode):
-            nb_ongoing = self.manage_stored_intervals(ln)
+            nb_ongoing = {sequence: self.manage_stored_intervals(ln, sequence) for sequence in self.sequences}
             var = 10**-10 if isinstance(child, EndNode) else 0 # because at end time, the event isn't ongoing anymore...
             # cost of noise
-            t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and not nb_ongoing.positive_count(getattr(occ, mom)-var)]
-            if len(t)/len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
-            t.sort()
+            t = self.get_times_by_sequence(child.event.name, mom, nb_ongoing, positive=False, offset=var)
+            if sum([len(values) for values in t.values()])/len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
             distrib_noise, noise_cost = self.additive_noise_cost(t) #self.additive_noise_cost(t)
             # cost of causal link
-            t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing.positive_count(getattr(occ, mom)-var)]
-            t.sort()  # needed if EndNode
+            t = self.get_times_by_sequence(child.event.name, mom, nb_ongoing, offset=var)
             distrib = ExponentialDistribution()
             delay_cost = self.fit_and_cost_PP(t, nb_ongoing, distrib)
             e = Edge(ln, child, None)
@@ -252,7 +268,7 @@ class Scorer:
         else: # [I, S/E]
             i_parent = pa1 if isinstance(pa1, IntervalNode) else pa2
             o_parent = pa1 if not isinstance(pa1, IntervalNode) else pa2
-            intervals = self.get_ongoing_range(self.data[i_parent.event.name])
+            intervals = {sequence: self.get_ongoing_range([occ for occ in self.data[i_parent.event.name] if occ.ts_index == sequence]) for sequence in self.sequences}
             _, _, other = self.match_occ_optimal(o_parent, child, intervals)
             if other is None: return None, np.inf, None
             distrib_noise = other["distrib_noise"]
@@ -291,29 +307,27 @@ class Scorer:
         t = [None, None]
         delay_cost = 0
         if isinstance(pa1, IntervalNode) and isinstance(pa2, IntervalNode):
-            nb_ongoing = self.manage_stored_intervals(ln)
+            nb_ongoing = {sequence: self.manage_stored_intervals(ln, sequence) for sequence in self.sequences}
             # cost of noise
-            nb_notongoing = nb_ongoing['both'].get_inverse()
-            t_noise = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_notongoing.positive_count(getattr(occ, mom))]
-            if len(t_noise) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
-            t_noise.sort()
+            nb_notongoing = {sequence: nb_ongoing[sequence]['both'].get_inverse() for sequence in self.sequences}
+            t_noise = self.get_times_by_sequence(child.event.name, mom, nb_notongoing)
+            if sum([len(values) for values in t_noise.values()]) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
             distrib_noise, noise_cost = self.additive_noise_cost(t_noise)
             # cost of causal link
             for i, pa in enumerate([pa1, pa2]):
-                t[i] = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing[pa.name].positive_count(getattr(occ, mom))]
-                if len(t[i]) == 0: return None, np.inf, None
-                t[i].sort()  # needed if EndNode
+                pa_ongoing = {sequence: nb_ongoing[sequence][pa.name] for sequence in self.sequences}
+                t[i] = self.get_times_by_sequence(child.event.name, mom, pa_ongoing)
+                if sum([len(values) for values in t[i].values()]) == 0: return None, np.inf, None
                 distrib[i] = ExponentialDistribution()
-                delay_cost += self.fit_and_cost_PP(t[i], nb_ongoing[pa.name], distrib[i])
+                delay_cost += self.fit_and_cost_PP(t[i], pa_ongoing, distrib[i])
             e = Edge(ln, child, None)
             other = {"distrib_1": distrib[0], "distrib_2": distrib[1], "distrib_noise": distrib_noise}
             return e, delay_cost + noise_cost + distrib_noise.get_parameter_cost() + distrib[0].get_parameter_cost() + distrib[1].get_parameter_cost(), other
         else: # [I, S/E]
             i_parent = pa1 if isinstance(pa1, IntervalNode) else pa2
             o_parent = pa1 if not isinstance(pa1, IntervalNode) else pa2
-            nb_ongoing = self.manage_stored_intervals(IntervalNode(i_parent.event))
-            intervals_off = nb_ongoing.get_inverse()
-            intervals_off = intervals_off.convert_to_interval_list()
+            nb_ongoing = {sequence: self.manage_stored_intervals(IntervalNode(i_parent.event), sequence) for sequence in self.sequences}
+            intervals_off = {sequence: nb_ongoing[sequence].get_inverse().convert_to_interval_list() for sequence in self.sequences}
             # Matches S/E with child
             _, _, other = self.match_occ_optimal(o_parent, child, intervals_off) #self.edge_fit_from_S_E_iter(o_parent, child, intervals_off)
             if other is None: return None, np.inf, None
@@ -332,45 +346,46 @@ class Scorer:
         """
         """
         assert isinstance(pa1, IntervalNode) and isinstance(pa2, IntervalNode)
-        partition = {pa1: [], pa2: [], 'noise': []}
+        partition = {pa1: {sequence: [] for sequence in self.sequences},
+                     pa2: {sequence: [] for sequence in self.sequences},
+                     'noise': {sequence: [] for sequence in self.sequences}}
         mom = 'start' if isinstance(child, StartNode) else 'end'
         ln = LogicalNode([pa1, pa2], 'or')
-        nb_ongoing = {pa1.name: self.manage_stored_intervals(IntervalNode(pa1.event)),
-                      pa2.name: self.manage_stored_intervals(IntervalNode(pa2.event)),
-                      'both': self.manage_stored_intervals(ln)}
+        nb_ongoing = {pa1.name: {sequence: self.manage_stored_intervals(IntervalNode(pa1.event), sequence) for sequence in self.sequences},
+                      pa2.name: {sequence: self.manage_stored_intervals(IntervalNode(pa2.event), sequence) for sequence in self.sequences},
+                      'both': {sequence: self.manage_stored_intervals(ln, sequence) for sequence in self.sequences}}
         # rate of noise
-        nb_notongoing = nb_ongoing['both'].get_inverse()
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_notongoing.positive_count(getattr(occ, mom))]
-        if len(t) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
-        t.sort()
+        nb_notongoing = {sequence: nb_ongoing['both'][sequence].get_inverse() for sequence in self.sequences}
+        t = self.get_times_by_sequence(child.event.name, mom, nb_notongoing)
+        if sum([len(values) for values in t.values()]) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
         partition['noise'] = t
-        rate_noise = len(t) / nb_notongoing.duration()
+        rate_noise = sum([len(values) for values in t.values()]) / sum([intervals.duration() for intervals in nb_notongoing.values()])
 
-        nb_ongoing_pure = self.manage_stored_intervals(LogicalNode([pa1, pa2], 'xor')) # to get pure intervals for rate fitting
+        nb_ongoing_pure = {sequence: self.manage_stored_intervals(LogicalNode([pa1, pa2], 'xor'), sequence) for sequence in self.sequences} # to get pure intervals for rate fitting
         # rate of pa1
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing_pure[pa1.name].positive_count(getattr(occ, mom))] # TODO: actually some of them can be noise
-        t.sort()
+        pa_ongoing = {sequence: nb_ongoing_pure[sequence][pa1.name] for sequence in self.sequences}
+        t = self.get_times_by_sequence(child.event.name, mom, pa_ongoing) # TODO: actually some of them can be noise
         partition[pa1] = t
-        d = nb_ongoing_pure[pa1.name].duration()
+        d = sum([intervals.duration() for intervals in pa_ongoing.values()])
         if d > 0:
-            rate_pa1 = max(0, len(t) / nb_ongoing_pure[pa1.name].duration() - rate_noise)
+            rate_pa1 = max(0, sum([len(values) for values in t.values()]) / d - rate_noise)
         else:
             return None, np.inf, None
         # rate of pa2
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing_pure[pa2.name].positive_count(getattr(occ, mom))] # TODO: actually some of them can be noise
-        t.sort()
+        pa_ongoing = {sequence: nb_ongoing_pure[sequence][pa2.name] for sequence in self.sequences}
+        t = self.get_times_by_sequence(child.event.name, mom, pa_ongoing) # TODO: actually some of them can be noise
         partition[pa2] = t
-        d = nb_ongoing_pure[pa2.name].duration()
+        d = sum([intervals.duration() for intervals in pa_ongoing.values()])
         if d > 0:
-            rate_pa2 = max(0, len(t) / nb_ongoing_pure[pa2.name].duration() - rate_noise)
+            rate_pa2 = max(0, sum([len(values) for values in t.values()]) / d - rate_noise)
         else:
             return None, np.inf, None
         if rate_pa2 < rate_noise or rate_pa1 < rate_noise or rate_pa1 == 0 or rate_pa2 == 0: return None, np.inf, None
 
-        nb_ongoing_mixed = self.manage_stored_intervals(LogicalNode([pa1, pa2], 'and'))  # to get intervals where both are active
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing_mixed.positive_count(getattr(occ, mom))]
-        if len(t) > 0:
-            t.sort()
+        nb_ongoing_mixed = {sequence: self.manage_stored_intervals(LogicalNode([pa1, pa2], 'and'), sequence) for sequence in self.sequences}  # to get intervals where both are active
+        mixed = self.get_times_by_sequence(child.event.name, mom, nb_ongoing_mixed)
+        for sequence, t in mixed.items():
+            if len(t) == 0: continue
             n_pa1 = round(rate_pa1/(rate_pa1+rate_pa2) * len(t))
             n_pa2 = round(rate_pa2/(rate_pa1+rate_pa2) * len(t))
 
@@ -395,9 +410,9 @@ class Scorer:
                     labels += [min_pa]
                 labels = labels[:len(t)]
             for i, l in enumerate(labels):
-                partition[l].append(t[i])
-            partition[pa1].sort()
-            partition[pa2].sort()
+                partition[l][sequence].append(t[i])
+            partition[pa1][sequence].sort()
+            partition[pa2][sequence].sort()
         # Compute cost
         distrib_noise, noise_cost = self.additive_noise_cost(partition['noise'])
         # cost of causal link
@@ -422,15 +437,13 @@ class Scorer:
         """
         assert isinstance(parent, IntervalNode) and not isinstance(child, IntervalNode)
         mom = 'start' if isinstance(child, StartNode) else 'end'
-        nb_ongoing = self.manage_stored_intervals(IntervalNode(parent.event))
+        nb_ongoing = {sequence: self.manage_stored_intervals(IntervalNode(parent.event), sequence) for sequence in self.sequences}
         # cost of noise
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and not nb_ongoing.positive_count(getattr(occ, mom))]
-        if len(t) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
-        t.sort()
+        t = self.get_times_by_sequence(child.event.name, mom, nb_ongoing, positive=False)
+        if sum([len(values) for values in t.values()]) / len(self.data[child.event.name]) > args.err_max: return None, np.inf, None
         distrib_noise, noise_cost = self.additive_noise_cost(t)
         # cost of causal link
-        t = [getattr(occ, mom) for occ in self.data[child.event.name] if getattr(occ, mom) is not None and nb_ongoing.positive_count(getattr(occ, mom))]
-        t.sort()  # needed if EndNode
+        t = self.get_times_by_sequence(child.event.name, mom, nb_ongoing)
         distrib = ExponentialDistribution()
         delay_cost = self.fit_and_cost_PP(t, nb_ongoing, distrib)
         e = Edge(parent, child, distrib)
@@ -440,6 +453,19 @@ class Scorer:
     def fit_and_cost_PP(self, t, nb_ongoing, distrib, fit=True):
         """Compute the delays with time occurrences and constraining intervals, fit the delay distribution,
         and compute the cost"""
+        if isinstance(t, dict):
+            if sum([len(values) for values in t.values()]) == 0: return 0
+            if fit:
+                duration = sum([nb_ongoing[sequence].duration() for sequence in self.sequences])
+                distrib.intensity = sum([len(values) for values in t.values()]) / duration
+            cost = 0
+            for sequence in self.sequences:
+                if len(t[sequence]) == 0:
+                    if nb_ongoing[sequence].duration() > 0:
+                        cost += sum(distrib.cost_per_delay([nb_ongoing[sequence].duration()]))
+                else:
+                    cost += self.fit_and_cost_PP(t[sequence], nb_ongoing[sequence], distrib, fit=False)
+            return cost
         if len(t) == 0: return 0
         delays = list()
         for i, occ in enumerate(t):
@@ -447,7 +473,7 @@ class Scorer:
                 delays.append(t[i] - nb_ongoing.get_last_inactive(t[i]).end)
             else:
                 delays.append(nb_ongoing.duration_between(t[i - 1], t[i]))
-        max_t = nb_ongoing.get_last_active(self.n).end
+        max_t = nb_ongoing.get_last_active(nb_ongoing.n).end
         delays.append(max_t-t[-1]) # Phantom occ to penalize nothing occurring at the end
         if fit:
             distrib.intensity = len(t) / nb_ongoing.duration()
@@ -478,79 +504,83 @@ class Scorer:
         matches = []
         delays = []
 
-        pa_occs = self.data[parent.event.name]
-        ch_occs = self.data[child.event.name]
-
         mom_pa = 'start' if isinstance(parent, StartNode) else 'end'
         mom_ch = 'start' if isinstance(child, StartNode) else 'end'
+        valid_parent_found = False
+        valid_child_found = False
 
-        # Precompute timestamps for performance
-        pa_timestamps_raw = [(pa, getattr(pa, mom_pa)) for pa in pa_occs if getattr(pa, mom_pa) is not None]
-        ch_timestamps = [(ch, getattr(ch, mom_ch)) for ch in ch_occs if getattr(ch, mom_ch) is not None]
+        for sequence in self.sequences:
+            pa_occs = [occ for occ in self.data[parent.event.name] if occ.ts_index == sequence]
+            ch_occs = [occ for occ in self.data[child.event.name] if occ.ts_index == sequence]
 
-        pa_timestamps_raw.sort(key=lambda x: x[1]) # necessary if parent is EndNode
+            # Precompute timestamps for performance
+            pa_timestamps_raw = [(pa, getattr(pa, mom_pa)) for pa in pa_occs if getattr(pa, mom_pa) is not None]
+            ch_timestamps = [(ch, getattr(ch, mom_ch)) for ch in ch_occs if getattr(ch, mom_ch) is not None]
 
-        # If intervals are used, optimize interval lookup
-        if intervals is not None:
-            # Sort intervals and convert to tuple of bounds for binary search
-            interval_bounds = sorted(intervals)
-            starts, ends = zip(*interval_bounds)
+            pa_timestamps_raw.sort(key=lambda x: x[1]) # necessary if parent is EndNode
 
-            def is_in_intervals(ts):
-                # Binary search for interval containment
-                i = bisect_right(starts, ts) - 1
-                return 0 <= i < len(interval_bounds) and ts < ends[i]
+            # If intervals are used, optimize interval lookup
+            if intervals is not None and intervals[sequence]:
+                # Sort intervals and convert to tuple of bounds for binary search
+                interval_bounds = sorted(intervals[sequence])
+                starts, ends = zip(*interval_bounds)
 
-            valid_pa_occs = [pa for pa, ts in pa_timestamps_raw if ts is not None and is_in_intervals(ts)]
-        else:
-            valid_pa_occs = [pa for pa, ts in pa_timestamps_raw if ts is not None]
+                def is_in_intervals(ts):
+                    # Binary search for interval containment
+                    i = bisect_right(starts, ts) - 1
+                    return 0 <= i < len(interval_bounds) and ts < ends[i]
 
-        valid_ch_occs = [ch for ch, _ in ch_timestamps]
-
-        if not valid_pa_occs or not valid_ch_occs:
-            return None, np.inf, None
-
-        # Extract timestamps again after filtering
-        pa_timestamps = [getattr(occ, mom_pa) for occ in valid_pa_occs]
-        ch_timestamps = [getattr(occ, mom_ch) for occ in valid_ch_occs]
-
-        pa_ts = [occ.ts_index for occ in valid_pa_occs]
-        ch_ts = [occ.ts_index for occ in valid_ch_occs]
-
-        matched_pa = set()
-        matched_ch = set()
-
-        nb_pa_matched = 0
-        for ch_i, ch_occ in enumerate(valid_ch_occs):
-            ch_t = ch_timestamps[ch_i]
-            idx = bisect_right(pa_timestamps, ch_t)
-            if idx == 0 or pa_timestamps[idx-1] == np.inf or pa_ts[idx-1+nb_pa_matched] != ch_ts[ch_i]: # child time is smaller than all parent times (from the same ts)
-                matches.append((None, ch_occ, np.inf, None))
+                valid_pa_occs = [pa for pa, ts in pa_timestamps_raw if ts is not None and is_in_intervals(ts)]
+            elif intervals is not None:
+                valid_pa_occs = []
             else:
-                pa_t = pa_timestamps[idx-1]
-                pa_j = idx - 1 + nb_pa_matched
-                matched_pa.add(valid_pa_occs[pa_j])
-                matched_ch.add(ch_occ)
-                delay = ch_timestamps[ch_i] - pa_t
-                delays.append(delay)
-                matches.append((valid_pa_occs[pa_j], ch_occ, delay))
-                pa_timestamps = np.delete(pa_timestamps, idx-1, 0)
-                nb_pa_matched += 1 # to keep the relation between pa_timestamps and valid_pa_occs despite the deletions
+                valid_pa_occs = [pa for pa, ts in pa_timestamps_raw if ts is not None]
 
-        # Unmatched parent occurrences
-        for pa in valid_pa_occs:
-            if pa not in matched_pa:
-                matches.append((pa, None, np.inf))
-                delays.append(np.inf)
+            valid_ch_occs = [ch for ch, _ in ch_timestamps]
+            valid_parent_found = valid_parent_found or bool(valid_pa_occs)
+            valid_child_found = valid_child_found or bool(valid_ch_occs)
+
+            # Extract timestamps again after filtering
+            pa_timestamps = [getattr(occ, mom_pa) for occ in valid_pa_occs]
+            ch_timestamps = [getattr(occ, mom_ch) for occ in valid_ch_occs]
+
+            matched_pa = set()
+            matched_ch = set()
+
+            nb_pa_matched = 0
+            for ch_i, ch_occ in enumerate(valid_ch_occs):
+                ch_t = ch_timestamps[ch_i]
+                idx = bisect_right(pa_timestamps, ch_t)
+                if idx == 0 or pa_timestamps[idx-1] == np.inf: # child time is smaller than all parent times
+                    matches.append((None, ch_occ, np.inf, None))
+                else:
+                    pa_t = pa_timestamps[idx-1]
+                    pa_j = idx - 1 + nb_pa_matched
+                    matched_pa.add(valid_pa_occs[pa_j])
+                    matched_ch.add(ch_occ)
+                    delay = ch_timestamps[ch_i] - pa_t
+                    delays.append(delay)
+                    matches.append((valid_pa_occs[pa_j], ch_occ, delay))
+                    pa_timestamps = np.delete(pa_timestamps, idx-1, 0)
+                    nb_pa_matched += 1 # to keep the relation between pa_timestamps and valid_pa_occs despite the deletions
+
+            # Unmatched parent occurrences
+            for pa in valid_pa_occs:
+                if pa not in matched_pa:
+                    matches.append((pa, None, np.inf))
+                    delays.append(np.inf)
+
+        if not valid_parent_found or not valid_child_found:
+            return None, np.inf, None
 
         def fit_model(delays, matches):
             distrib = ExponentialDistribution()
             # noise cost for child (child triggered without parents)
             unmatched_ch_occs = [m[1] for m in matches if m[0] is None]
             mom = 'start' if isinstance(child, StartNode) else 'end'
-            t = [getattr(occ, mom) for occ in unmatched_ch_occs if getattr(occ, mom) is not None]
-            if len(t) / len(self.data[child.event.name]) > args.err_max: return np.inf, None
-            t.sort()
+            t = {sequence: [getattr(occ, mom) for occ in unmatched_ch_occs if occ.ts_index == sequence and getattr(occ, mom) is not None] for sequence in self.sequences}
+            if sum([len(values) for values in t.values()]) / len(self.data[child.event.name]) > args.err_max: return np.inf, None
+            for values in t.values(): values.sort()
             distrib_noise, noise_cost = self.additive_noise_cost(t)
             # cost of causal link
             distrib.fit_to_delays(delays)
@@ -599,8 +629,13 @@ class Scorer:
 
     def additive_noise_cost(self, t_occ):
         distrib_noise = ExponentialDistribution()
-        t_occ = [t for t in t_occ if t != np.inf]
-        noise_cost = self.fit_and_cost_PP(t_occ, IntervalList([Interval(0, self.n, 1)], self.n), distrib_noise)
+        if isinstance(t_occ, dict):
+            t_occ = {sequence: [t for t in t_occ[sequence] if t != np.inf] for sequence in self.sequences}
+            intervals = {sequence: IntervalList([Interval(0, self.n[sequence], 1)], self.n[sequence]) for sequence in self.sequences}
+        else:
+            t_occ = [t for t in t_occ if t != np.inf]
+            intervals = IntervalList([Interval(0, self.n, 1)], self.n)
+        noise_cost = self.fit_and_cost_PP(t_occ, intervals, distrib_noise)
         return distrib_noise, noise_cost
 
     def edge_fit(self, parent, child):
@@ -625,64 +660,70 @@ class Scorer:
         :return: cost
         """
         assert isinstance(node, StartNode)
-        t = [occ.start for occ in self.data[node.event.name]]
+        t = {sequence: [occ.start for occ in self.data[node.event.name] if occ.ts_index == sequence] for sequence in self.sequences}
+        intervals = {sequence: IntervalList([Interval(0, self.n[sequence], 1)], self.n[sequence]) for sequence in self.sequences}
         distrib = ExponentialDistribution()
-        delay_cost = self.fit_and_cost_PP(t, IntervalList([Interval(0, self.n, 1)], self.n), distrib)
+        delay_cost = self.fit_and_cost_PP(t, intervals, distrib)
         return delay_cost + distrib.get_parameter_cost()
 
     def match_occ_optimal_dual(self, pa1, pa2, child): # 5.2 Occurrence Partitioning in paper
         matches = []
         delays = {pa1: [], pa2: []}
 
-        # Get occurrences from data
-        pa1_occs = self.data[pa1.event.name]
-        pa2_occs = self.data[pa2.event.name]
-        ch_occs = self.data[child.event.name]
-
         # Extract timestamps
         mom_pa1 = 'start' if isinstance(pa1, StartNode) else 'end'
         mom_pa2 = 'start' if isinstance(pa2, StartNode) else 'end'
         mom_ch = 'start' if isinstance(child, StartNode) else 'end'
+        valid_parent_found = False
+        valid_child_found = False
 
-        # Filter by valid intervals
-        valid_pa_obj = [(getattr(pa, mom_pa1), pa, pa1) for pa in pa1_occs if getattr(pa, mom_pa1) is not None] # t, occ, node
-        valid_pa_obj += [(getattr(pa, mom_pa2), pa, pa2) for pa in pa2_occs if getattr(pa, mom_pa2) is not None] # t, occ, node
-        valid_pa_obj.sort(key=lambda x: x[0])
+        for sequence in self.sequences:
+            # Get occurrences from data
+            pa1_occs = [occ for occ in self.data[pa1.event.name] if occ.ts_index == sequence]
+            pa2_occs = [occ for occ in self.data[pa2.event.name] if occ.ts_index == sequence]
+            ch_occs = [occ for occ in self.data[child.event.name] if occ.ts_index == sequence]
 
-        valid_ch_occs = [ch for ch in ch_occs if getattr(ch, mom_ch) is not None]
+            # Filter by valid intervals
+            valid_pa_obj = [(getattr(pa, mom_pa1), pa, pa1) for pa in pa1_occs if getattr(pa, mom_pa1) is not None] # t, occ, node
+            valid_pa_obj += [(getattr(pa, mom_pa2), pa, pa2) for pa in pa2_occs if getattr(pa, mom_pa2) is not None] # t, occ, node
+            valid_pa_obj.sort(key=lambda x: x[0])
 
-        if not valid_pa_obj or not valid_ch_occs:
-            return None, None # If no valid occurrences, return
+            valid_ch_occs = [ch for ch in ch_occs if getattr(ch, mom_ch) is not None]
+            valid_parent_found = valid_parent_found or bool(valid_pa_obj)
+            valid_child_found = valid_child_found or bool(valid_ch_occs)
 
-        ch_timestamps = [getattr(occ, mom_ch) for occ in valid_ch_occs]
+            ch_timestamps = [getattr(occ, mom_ch) for occ in valid_ch_occs]
 
-        matched_pa1 = set()
-        matched_pa2 = set()
-        matched_ch = set()
+            matched_pa1 = set()
+            matched_pa2 = set()
+            matched_ch = set()
 
-        for ch_i, ch_occ in enumerate(valid_ch_occs):
-            ch_t = ch_timestamps[ch_i]
-            idx = bisect_right([o[0] for o in valid_pa_obj], ch_t)
-            if idx == 0 or valid_pa_obj[idx-1] == np.inf or ch_occ.ts_index != valid_pa_obj[idx-1][1].ts_index:  # child time is smaller than all parent times from its time series
-                matches.append((None, ch_occ, np.inf, None))
-            else:
-                pa_obj = valid_pa_obj[idx-1]
-                pa_t, pa_occ, pa_node = pa_obj
-                if pa_node == pa1:
-                    matched_pa = matched_pa1
+            for ch_i, ch_occ in enumerate(valid_ch_occs):
+                ch_t = ch_timestamps[ch_i]
+                idx = bisect_right([o[0] for o in valid_pa_obj], ch_t)
+                if idx == 0 or valid_pa_obj[idx-1] == np.inf:  # child time is smaller than all parent times
+                    matches.append((None, ch_occ, np.inf, None))
                 else:
-                    matched_pa = matched_pa2
-                matched_pa.add(pa_occ)
-                matched_ch.add(ch_occ)
-                delay = ch_t - pa_t
-                delays[pa_node].append(delay)
-                matches.append((pa_occ, ch_occ, delay, pa_node))
-                valid_pa_obj.remove(pa_obj) # parent occurrence is taken
+                    pa_obj = valid_pa_obj[idx-1]
+                    pa_t, pa_occ, pa_node = pa_obj
+                    if pa_node == pa1:
+                        matched_pa = matched_pa1
+                    else:
+                        matched_pa = matched_pa2
+                    matched_pa.add(pa_occ)
+                    matched_ch.add(ch_occ)
+                    delay = ch_t - pa_t
+                    delays[pa_node].append(delay)
+                    matches.append((pa_occ, ch_occ, delay, pa_node))
+                    valid_pa_obj.remove(pa_obj) # parent occurrence is taken
 
-        # Unmatched parent occurrences
-        for pa_obj in valid_pa_obj:
-            matches.append((pa_obj[1], None, np.inf, pa_obj[2]))
-            delays[pa_obj[2]].append(np.inf)
+            # Unmatched parent occurrences
+            for pa_obj in valid_pa_obj:
+                matches.append((pa_obj[1], None, np.inf, pa_obj[2]))
+                delays[pa_obj[2]].append(np.inf)
+
+        if not valid_parent_found or not valid_child_found:
+            return None, None # If no valid occurrences, return
 
         def fit_model(delays, matches):
             distrib = {pa: ExponentialDistribution() for pa in [pa1, pa2]}
@@ -690,9 +731,9 @@ class Scorer:
             # noise cost for child (child triggered without parents)
             unmatched_ch_occs = [m[1] for m in matches if m[0] is None]
             mom = 'start' if isinstance(child, StartNode) else 'end'
-            t = [getattr(occ, mom) for occ in unmatched_ch_occs if getattr(occ, mom) is not None]
-            if len(t) / len(self.data[child.event.name]) > args.err_max: return np.inf, None
-            t.sort()
+            t = {sequence: [getattr(occ, mom) for occ in unmatched_ch_occs if occ.ts_index == sequence and getattr(occ, mom) is not None] for sequence in self.sequences}
+            if sum([len(values) for values in t.values()]) / len(self.data[child.event.name]) > args.err_max: return np.inf, None
+            for values in t.values(): values.sort()
             distrib_noise, noise_cost = self.additive_noise_cost(t)
             # cost of causal link
             for pa in [pa1, pa2]:
@@ -739,7 +780,7 @@ class Scorer:
         return full_cost, other
 
     def estimate_parents_intervals(self, child, backward_only=False, forward_only=False, width=30):
-        intervals = IntervalList(n=self.n)
+        intervals = {sequence: IntervalList(n=self.n[sequence]) for sequence in self.sequences}
         mom = 'start' if isinstance(child, StartNode) else 'end'
         for occ in self.data[child.event.name]:
             if getattr(occ, mom) is None: continue
@@ -749,7 +790,7 @@ class Scorer:
                 start, end = getattr(occ, mom), getattr(occ, mom) + width
             else:
                 start, end = getattr(occ, mom) - width / 2, getattr(occ, mom) + width / 2
-            intervals.add_interval(Interval(start, end), sum_count=True)
+            intervals[occ.ts_index].add_interval(Interval(start, end), sum_count=True)
         return intervals
 
 
@@ -766,13 +807,15 @@ class Scorer:
         data = dict.fromkeys(self.graph.non_logical_nodes)
         for node in self.graph.non_logical_nodes:
             if isinstance(node, StartNode):
-                data[node] = [occ.start for occ in self.data[node.event.name]]
+                data[node] = {sequence: [occ.start for occ in self.data[node.event.name] if occ.ts_index == sequence] for sequence in self.sequences}
             elif isinstance(node, EndNode):
-                data[node] = [occ.end for occ in self.data[node.event.name] if occ.end is not None]
+                data[node] = {sequence: [occ.end for occ in self.data[node.event.name] if occ.ts_index == sequence and occ.end is not None] for sequence in self.sequences}
             else:
-                data[node] = self.get_ongoing_range(self.data[node.event.name])
-            for d in data.values():
-                if d is not None: d.sort()
+                data[node] = {sequence: self.get_ongoing_range([occ for occ in self.data[node.event.name] if occ.ts_index == sequence]) for sequence in self.sequences}
+            for d in data[node].values(): d.sort()
+
+        def data_len(node):
+            return sum([len(values) for values in data[node].values()])
         # stat computation
         for ch_i, child in enumerate(self.graph.non_logical_nodes):
             if isinstance(child, IntervalNode): continue
@@ -781,25 +824,27 @@ class Scorer:
             for pa_i, parent in enumerate(self.graph.non_logical_nodes):
                 if parent == child or parent.event == child.event: continue
                 if not isinstance(parent, IntervalNode):
-                    pa_occs = data[parent]
                     count = 0
-                    for i in intervals.intervals:
-                        idx1 = bisect_right(pa_occs, i.start)
-                        idx2 = bisect_right(pa_occs, i.end)
-                        count += min(i.count, idx2 - idx1)
-                    stats[ch_i, pa_i] = count / len(data[child])
+                    for sequence in self.sequences:
+                        pa_occs = data[parent][sequence]
+                        for i in intervals[sequence].intervals:
+                            idx1 = bisect_right(pa_occs, i.start)
+                            idx2 = bisect_right(pa_occs, i.end)
+                            count += min(i.count, idx2 - idx1)
+                    stats[ch_i, pa_i] = count / data_len(child)
                 else: # IntervalNode
                     if child.event == parent.event: continue
-                    pa_intervals = self.manage_stored_intervals(parent)
                     cpos = 0
                     cneg = 0
-                    for t in data[child]:
-                        if pa_intervals.positive_count(t) or pa_intervals.duration_between(t-width, t) > 0:
-                            cpos += 1
-                        if not pa_intervals.positive_count(t):
-                            cneg += 1
-                    ipos[ch_i, pa_i] = cpos / len(data[child])
-                    ineg[ch_i, pa_i] = cneg / len(data[child])
+                    for sequence in self.sequences:
+                        pa_intervals = self.manage_stored_intervals(parent, sequence)
+                        for t in data[child][sequence]:
+                            if pa_intervals.positive_count(t) or pa_intervals.duration_between(t-width, t) > 0:
+                                cpos += 1
+                            if not pa_intervals.positive_count(t):
+                                cneg += 1
+                    ipos[ch_i, pa_i] = cpos / data_len(child)
+                    ineg[ch_i, pa_i] = cneg / data_len(child)
         # interesting causal mechs selection
         promising = list()
         for ch_i, child in enumerate(self.graph.get_non_logical_nodes()):
@@ -816,7 +861,7 @@ class Scorer:
                     ln = LogicalNode([parent, child.event.i_node], 'and')
                     promising.append(Edge(ln, child, None))
                     continue
-                if len(data[child]) / len(data[parent]) > (1-args.err_max) * 0.9: # alpha
+                if data_len(child) / data_len(parent) > (1-args.err_max) * 0.9: # alpha
                     promising.append(Edge(parent, child, None)) # S/E -> child
                 # else:
                 for id2 in low_p_i_idx:
@@ -853,7 +898,7 @@ class Scorer:
                 for r in result_indices:
                     parent1 = self.graph.non_logical_nodes[r[0]]
                     parent2 = self.graph.non_logical_nodes[r[1]]
-                    if len(data[child]) / len(data[parent1]) > (1-args.err_max) * 0.9 and len(data[child]) / len(data[parent2]) > (1-args.err_max) * 0.9:
+                    if data_len(child) / data_len(parent1) > (1-args.err_max) * 0.9 and data_len(child) / data_len(parent2) > (1-args.err_max) * 0.9:
                         ln = LogicalNode([parent1, parent2], 'xor')
                         promising.append(Edge(ln, child, None))
                 # S/E OR S/E -> child
@@ -865,7 +910,7 @@ class Scorer:
                 for r in result_indices:
                     parent1 = self.graph.non_logical_nodes[r[0]]
                     parent2 = self.graph.non_logical_nodes[r[1]]
-                    if (len(data[child]) * stats[ch_i, r[0]]) / len(data[parent1]) > (1-args.err_max) * 0.9 and (len(data[child]) * stats[ch_i, r[1]]) / len(data[parent2]) > (1-args.err_max) * 0.9:
+                    if (data_len(child) * stats[ch_i, r[0]]) / data_len(parent1) > (1-args.err_max) * 0.9 and (data_len(child) * stats[ch_i, r[1]]) / data_len(parent2) > (1-args.err_max) * 0.9:
                         ln = LogicalNode([parent1, parent2], 'or')
                         promising.append(Edge(ln, child, None))
                 # I OR I -> child

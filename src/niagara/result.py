@@ -39,7 +39,7 @@ class NiagaraResult:
     adjacency: np.ndarray
     feature_names: Tuple[Any, ...]
     mechanisms: Tuple[CausalMechanism, ...]
-    horizon: float
+    horizon: Any
 
     def __post_init__(self) -> None:
         matrix = np.asarray(self.adjacency)
@@ -81,7 +81,14 @@ class NiagaraResult:
                 }
                 for mechanism in self.mechanisms
             ],
-            "horizon": _plain(self.horizon),
+            "horizon": (
+                [
+                    {"sequence": _plain(sequence), "horizon": value}
+                    for sequence, value in self.horizon.items()
+                ]
+                if isinstance(self.horizon, dict)
+                else _plain(self.horizon)
+            ),
         }
 
     def to_json(self, path: Any) -> None:

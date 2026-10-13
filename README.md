@@ -16,6 +16,10 @@ pip install niagara-cd
 
 Provide one row per event occurrence.
 The columns are the event name, start time, and end time; an optional fourth column identifies a sequence.
+Sequences are treated as independent timelines while sharing one fitted graph and set of distribution parameters; do not offset sequences to make their timestamps non-overlapping.
+Times are elapsed values starting at `0` within each sequence, rather than absolute calendar dates.
+Pass one `horizon` for equal-length recordings or a mapping such as `{"Sydney": 24, "London": 12}` for different lengths.
+If omitted, each sequence's maximum recorded timestamp is used; provide it explicitly when observation continued silently after the final event.
 
 ```python
 import numpy as np
@@ -83,7 +87,7 @@ Rows are kept in their supplied order, and event names are preserved.
 
 ## Public API
 
-`fit(data, *, horizon, feature_names=None, config=None)` fits Niagara and returns a `NiagaraResult`.
+`fit(data, *, horizon=None, feature_names=None, config=None)` fits Niagara and returns a `NiagaraResult`.
 
 `NiagaraConfig` controls exhaustive or partial search, the maximum error proportion, start-only mode, the OR heuristic, and MDL precision.
 Defaults match the publication implementation.

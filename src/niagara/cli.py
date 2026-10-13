@@ -52,7 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Causal discovery from interval-based event sequences.",
     )
     parser.add_argument("input", type=Path, help="CSV with event,start,end columns")
-    parser.add_argument("--horizon", required=True, type=float)
+    parser.add_argument(
+        "--horizon",
+        type=float,
+        help="Common observation horizon; defaults to each sequence's last timestamp.",
+    )
     parser.add_argument("--output", required=True, type=Path, help="Result JSON path")
     parser.add_argument("--adjacency-output", type=Path, help="Optional adjacency CSV path")
     parser.add_argument(

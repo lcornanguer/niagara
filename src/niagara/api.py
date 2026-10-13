@@ -25,10 +25,6 @@ from .config import NiagaraConfig
 from .result import CausalMechanism, Endpoint, NiagaraResult
 
 
-class NiagaraCompatibilityWarning(RuntimeWarning):
-    """Warning about intentionally preserved publication-code behavior."""
-
-
 _FIT_LOCK = RLock()
 
 
@@ -97,9 +93,14 @@ def _rows_from_mapping(data: Mapping[Any, Any]) -> List[Tuple[Any, Any, Any, Any
 def _normalise_input(
     data: Any,
     feature_names: Optional[Sequence[Hashable]],
-    horizon: float,
+    horizon: Any,
     config: NiagaraConfig,
-) -> Tuple[Tuple[Hashable, ...], Dict[Hashable, List[EventOcc]], Graph]:
+) -> Tuple[
+    Tuple[Hashable, ...],
+    Dict[Hashable, List[EventOcc]],
+    Dict[Hashable, float],
+    Graph,
+]:
     if isinstance(data, Mapping):
         rows = _rows_from_mapping(data)
     elif hasattr(data, "columns") and hasattr(data, "loc"):
@@ -131,6 +132,8 @@ def _normalise_input(
     occurrences: Dict[Hashable, List[EventOcc]] = {
         name: [] for name in ordered_names
     }
+    parsed_rows = []
+    sequences = []
 
     for index, (raw_event, raw_start, raw_end, sequence) in enumerate(rows):
         event = raw_event
@@ -145,17 +148,57 @@ def _normalise_input(
             hash(sequence)
         except TypeError as error:
             raise TypeError(f"sequence at row {index} must be hashable") from error
+        if sequence not in sequences:
+            sequences.append(sequence)
         start = _as_time(raw_start, f"start at row {index}")
         end = None if _is_missing(raw_end) else _as_time(raw_end, f"end at row {index}")
         if start < 0:
             raise ValueError(f"start at row {index} must be non-negative")
-        if start > horizon:
-            raise ValueError(f"start at row {index} exceeds horizon {horizon}")
         if end is not None:
             if end < start:
                 raise ValueError(f"end at row {index} precedes its start")
-            if end > horizon:
-                raise ValueError(f"end at row {index} exceeds horizon {horizon}")
+        parsed_rows.append((index, event, start, end, sequence))
+
+    if horizon is None:
+        horizons = {
+            sequence: max(
+                end if end is not None else start
+                for _, _, start, end, row_sequence in parsed_rows
+                if row_sequence == sequence
+            )
+            for sequence in sequences
+        }
+    elif isinstance(horizon, Mapping):
+        missing = [sequence for sequence in sequences if sequence not in horizon]
+        extra = [sequence for sequence in horizon if sequence not in sequences]
+        if missing:
+            raise ValueError(f"horizon is missing sequence(s): {missing!r}")
+        if extra:
+            raise ValueError(f"horizon contains unknown sequence(s): {extra!r}")
+        horizons = {
+            sequence: _as_time(horizon[sequence], f"horizon for sequence {sequence!r}")
+            for sequence in sequences
+        }
+    else:
+        numeric_horizon = _as_time(horizon, "horizon")
+        horizons = {sequence: numeric_horizon for sequence in sequences}
+
+    for sequence, value in horizons.items():
+        if value <= 0:
+            raise ValueError(f"horizon for sequence {sequence!r} must be positive")
+
+    for index, event, start, end, sequence in parsed_rows:
+        sequence_horizon = horizons[sequence]
+        if start > sequence_horizon:
+            raise ValueError(
+                f"start at row {index} exceeds horizon {sequence_horizon} "
+                f"for sequence {sequence!r}"
+            )
+        if end is not None and end > sequence_horizon:
+            raise ValueError(
+                f"end at row {index} exceeds horizon {sequence_horizon} "
+                f"for sequence {sequence!r}"
+            )
         occurrences[event].append(EventOcc(events[event], start, end, sequence))
 
     empty = [name for name, values in occurrences.items() if not values]
@@ -163,18 +206,21 @@ def _normalise_input(
         raise ValueError(f"Every feature must occur at least once; empty: {empty!r}")
 
     for event, values in occurrences.items():
-        starts = [item.start for item in values]
-        if starts != sorted(starts):
-            warnings.warn(
-                f"Occurrences for {event!r} are not ordered by start time. "
-                "Publication behavior is row-order-sensitive; the input was not reordered.",
-                NiagaraCompatibilityWarning,
-                stacklevel=3,
-            )
+        sequences = {item.ts_index for item in values}
+        for sequence in sequences:
+            starts = [item.start for item in values if item.ts_index == sequence]
+            if starts != sorted(starts):
+                warnings.warn(
+                    f"Occurrences for {event!r} in sequence {sequence!r} are not "
+                    "ordered by start time. Publication behavior is row-order-sensitive; "
+                    "the input was not reordered.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
 
     graph = Graph()
     graph.init_from_events(ordered_names)
-    return tuple(ordered_names), occurrences, graph
+    return tuple(ordered_names), occurrences, horizons, graph
 
 
 def _kind(node: Any) -> str:
@@ -214,7 +260,7 @@ def _mechanisms(graph: Graph) -> Tuple[CausalMechanism, ...]:
 def fit(
     data: Any,
     *,
-    horizon: Real,
+    horizon: Any = None,
     feature_names: Optional[Sequence[Hashable]] = None,
     config: Optional[NiagaraConfig] = None,
 ) -> NiagaraResult:
@@ -223,21 +269,27 @@ def fit(
     ``data`` may be a Pandas DataFrame with ``event``, ``start``, ``end``,
     and optional ``sequence`` columns; a NumPy array with the same three or
     four columns; or a mapping from event names to start/end arrays.
+    Sequences have independent timelines and share one fitted graph and set
+    of distribution parameters. ``horizon`` may be a common number, a mapping
+    from sequence names to numbers, or omitted to use each sequence's maximum
+    recorded timestamp.
     """
     effective = config if config is not None else NiagaraConfig()
-    numeric_horizon = _as_time(horizon, "horizon")
-    if numeric_horizon <= 0:
-        raise ValueError("horizon must be positive")
     if not effective.start_only:
         warnings.warn(
             "start_only=False uses the unchanged end-event path from the "
             "publication snapshot, including its known limitations.",
-            NiagaraCompatibilityWarning,
+            RuntimeWarning,
             stacklevel=2,
         )
 
-    names, occurrences, empty_graph = _normalise_input(
-        data, feature_names, numeric_horizon, effective
+    names, occurrences, horizons, empty_graph = _normalise_input(
+        data, feature_names, horizon, effective
+    )
+    result_horizon = (
+        next(iter(horizons.values()))
+        if horizon is not None and not isinstance(horizon, Mapping)
+        else horizons
     )
 
     with _FIT_LOCK:
@@ -251,7 +303,7 @@ def fit(
             "or_heuristic": args.or_heuristic,
             "start_only": args.start_only,
         }
-        args.n = numeric_horizon
+        args.n = horizons
         args.search = effective.search
         args.window_length = effective.window_length
         args.err_max = effective.max_error
@@ -263,7 +315,7 @@ def fit(
         try:
             with output:
                 searcher = Searcher(
-                    numeric_horizon,
+                    horizons,
                     occurrences,
                     empty_graph,
                     exhaustive_search=effective.search == "exhaustive",
@@ -279,5 +331,5 @@ def fit(
         adjacency=adjacency,
         feature_names=names,
         mechanisms=_mechanisms(searcher.graph),
-        horizon=numeric_horizon,
+        horizon=result_horizon,
     )
